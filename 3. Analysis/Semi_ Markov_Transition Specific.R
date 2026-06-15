@@ -2,7 +2,7 @@
 
 if(!require(pacman))install.packages("pacman")
 pacman::p_load(msm,haven, openxlsx,readxl, dplyr, lubridate, stringr, ggplot2, gtsummary, 
-               gt, tidyr, forcats, purrr,flexsurv, mstate, SemiMarkov,RColorBrewer)
+               gt, tidyr, forcats, purrr,flexsurv, mstate, SemiMarkov,RColorBrewer, officer, flextable)
 
 
 # =============================================================================
@@ -416,6 +416,67 @@ sojourn_results_df <- purrr::imap_dfr(
 #================================================================================
 # DISPLAY RESULTS
 #================================================================================
+# transition_names <- c(
+#   "1" = "Inmigration → Outmigration",
+#   "2" = "Baseline Resident → Outmigration",
+#   "3" = "Inmigration → Internal Movement",
+#   "4" = "Baseline Resident → Internal Movement",
+#   "5" = "Outmigration → Inmigration",
+#   "6" = "Internal Movement → Outmigration",
+#   "7" = "Internal Movement → Internal Movement"
+# )
+
+
+sojourn_results_df$Transition <- as.factor(sojourn_results_df$Transition)
+sojourn_results_df$Distribution <- as.factor(sojourn_results_df$Distribution)
+
+sojourn_results_df <- sojourn_results_df %>%
+  mutate(Transition = case_when(Transition == "In-migration → Internal movement" ~ "Baseline resident → Out-migration",
+                                Transition == "Baseline resident → Out-migration" ~ "In-migration → Internal movement",
+                                TRUE~ Transition
+         ))
+
+#Colors
+set2_colors <- brewer.pal(8, "Set2")
+custom_colors <- set2_colors[c(1, 2, 3, 4, 5, 7)]
+
+#Plot
+sensitivity_plot <- ggplot(
+  sojourn_results_df,
+  aes(
+    x = Transition,
+    y = MeanSojourn,
+    fill = Distribution
+  )
+) +
+  geom_col(position = position_dodge(0.8), width = 0.7) +
+  coord_flip() +
+  scale_fill_manual(values = custom_colors) +
+  
+  labs(
+    x = "",
+    y = "Mean Sojourn Time",
+    fill = "Distribution"
+  ) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, colour = "black"),
+    axis.text.y = element_text(colour = "black"),
+    legend.position = "right",
+    panel.grid.minor = element_blank()
+  )
+
+#Save the plot
+save_plot(sensitivity_plot, "sensitivity_plot.png",10,4)
+save_plot(sensitivity_plot, "sensitivity_plot.tiff",10,4)
+
+
+# =============================================================================
+# CUMULATIVE HAZARD PLOTS: PARAMETRIC vs NELSON–AALEN 
+# =============================================================================
+
+# TRANSITION LABELS
 transition_names <- c(
   "1" = "Inmigration → Outmigration",
   "2" = "Baseline Resident → Outmigration",
@@ -426,113 +487,156 @@ transition_names <- c(
   "7" = "Internal Movement → Internal Movement"
 )
 
-sojourn_results_df$Transition <- transition_names[as.character(sojourn_results_df$Transition)]
-# Ensure Transition is treated as a factor
-sojourn_results_df$Transition <- factor(sojourn_results_df$Transition)
+# Ensure consistent ordering
+transitions <- sort(unique(df_smm$trans))
 
-set2_colors <- brewer.pal(8, "Set2")
+#---------------------------------------------------------
+# FIT BASELINE MODELS (PARAMETRIC)
+#---------------------------------------------------------
 
-custom_colors <- set2_colors[c(1, 2, 3, 4, 5, 7)]
-
-sensitivity_plot <- ggplot(
-  sojourn_results_df,
-  aes(
-    x = Transition,
-    y = MeanSojourn,
-    fill = Distribution
+baseline_models <- lapply(transitions, function(k) {
+  
+  data_k <- subset(df_smm, trans == k)
+  dist_k <- best_distributions[[as.character(k)]]
+  
+  flexsurvreg(
+    Surv(time_in_state, status) ~ 1,
+    data = data_k,
+    dist = dist_k
   )
-) +
-  geom_col(
-    position = position_dodge(0.8),
-    width = 0.7
-  ) +
-  coord_flip() +
-  scale_fill_manual(values = custom_colors) +
-  labs(
-    x = NULL,
-    y = "Mean Sojourn Time",
-    fill = "Distribution"
-  ) +
-  theme_bw(base_size = 14) +
-  theme(
-    legend.position = "right",
-    panel.grid.minor = element_blank(),
-    plot.title = element_blank()
-  )
-
-save_plot(sensitivity_plot, "sensitivity_plot.png")
-
-# =============================================================================
-# CUMULATIVE HAZARD PLOTS: PARAMETRIC vs NELSON–AALEN (FIGURE 1)
-# =============================================================================
-
-plot_cumhaz_data <- purrr::map_dfr(names(fitted_models), function(trans) {
-  
-  data_k <- subset(df_smm, df_smm$trans == as.numeric(trans))
-  dist_k <- best_distributions[[trans]]
-  label  <- paste0("Transition ", trans, ": ", transition_labels[trans])
-  
-  # Nelson–Aalen
-  na_fit <- survfit(Surv(time_in_state, status) ~ 1, data = data_k, type = "fh")
-  na_df  <- data.frame(
-    time       = na_fit$time,
-    cumhaz     = na_fit$cumhaz,
-    Method     = "Nelson-Aalen estimate",
-    Transition = label
-  )
-  
-  # Baseline parametric model
-  mod_plot  <- flexsurvreg(Surv(time_in_state, status) ~ 1, data = data_k, dist = dist_k)
-  t_seq     <- seq(0, max(data_k$time_in_state, na.rm = TRUE), length.out = 200)
-  fh_fitted <- summary(mod_plot, type = "cumhaz", t = t_seq, ci = FALSE)
-  
-  param_df <- data.frame(
-    time       = fh_fitted[[1]]$time,
-    cumhaz     = fh_fitted[[1]]$est,
-    Method     = "Parametric estimate",
-    Transition = label
-  )
-  
-  bind_rows(na_df, param_df)
 })
 
-p_cumhaz <- ggplot() +
-  geom_step(
-    data = subset(plot_cumhaz_data, Method == "Nelson-Aalen estimate"),
-    aes(x = time, y = cumhaz, colour = Method),
-    linewidth = 0.9
-  ) +
-  geom_line(
-    data = subset(plot_cumhaz_data, Method == "Parametric estimate"),
-    aes(x = time, y = cumhaz, colour = Method),
-    linewidth = 0.9
-  ) +
-  scale_colour_manual(
-    values = c("Nelson-Aalen estimate" = "#1F78B4", "Parametric estimate" = "#E31A1C")
-  ) +
-  scale_x_continuous(limits = c(0, 15), breaks = seq(0, 15, by = 3)) +
-  facet_wrap(~Transition, scales = "free", axes = "all") +
-  labs(x = "Time (years)", y = "Cumulative hazard", colour = NULL) +
-  theme_minimal(base_size = 13) +
-  theme(
-    strip.text       = element_text(face = "bold", size = 11),
-    legend.position  = "bottom",
-    legend.text      = element_text(size = 11),
-    axis.title       = element_text(face = "bold"),
-    panel.grid.minor = element_blank()
-  )
+names(baseline_models) <- as.character(transitions)
 
-ggsave(
-  filename = file.path(hazard_plot_dir, "Combined_Cumulative_Hazard_Plots.png"),
-  plot     = p_cumhaz,
-  width    = 14, height = 10, dpi = 400
+#---------------------------------------------------------
+# TIME GRID
+#---------------------------------------------------------
+
+t_grid <- seq(0, 15, by = 0.1)
+
+#---------------------------------------------------------
+# 4. PARAMETRIC CUMULATIVE HAZARD FUNCTION
+#---------------------------------------------------------
+
+get_param_haz <- function(model, t_grid) {
+  
+  s <- summary(model, t = t_grid, type = "cumhaz")[[1]]
+  
+  data.frame(
+    time = s$time,
+    est  = s$est,
+    lcl  = s$lcl,
+    ucl  = s$ucl
+  )
+}
+
+param_haz <- do.call(rbind, lapply(names(baseline_models), function(k) {
+  
+  df <- get_param_haz(baseline_models[[k]], t_grid)
+  df$Transition <- k
+  df
+}))
+
+#---------------------------------------------------------
+# NON-PARAMETRIC (NELSON–AALEN)
+#---------------------------------------------------------
+
+get_np_haz <- function(data_k) {
+  
+  fit <- survfit(Surv(time_in_state, status) ~ 1, data = data_k)
+  
+  data.frame(
+    time = fit$time,
+    haz  = fit$cumhaz
+  )
+}
+
+np_haz <- do.call(rbind, lapply(transitions, function(k) {
+  
+  data_k <- subset(df_smm, trans == k)
+  
+  df <- get_np_haz(data_k)
+  df$Transition <- as.character(k)
+  df
+}))
+
+#---------------------------------------------------------
+# PLOTTING SETUP
+#---------------------------------------------------------
+
+par(mfrow = c(3, 3), mar = c(3.5, 3.5, 3, 1))
+
+
+#  MAIN LOOP
+for (k in transitions) {
+  
+  data_k <- subset(df_smm, trans == k)
+  
+  sf <- survfit(Surv(time_in_state, status) ~ 1, data = data_k)
+  
+  fitted_haz <- subset(param_haz, Transition == as.character(k))
+  na_haz <- sf$cumhaz
+  
+  # X-axis rule
+  xlim_use <- if (k == 3) c(0, 1) else c(0, 15)
+  
+  ymax <- max(
+    na_haz,
+    fitted_haz$ucl,
+    na.rm = TRUE
+  )
+  
+  plot(
+    sf$time,
+    na_haz,
+    type = "s",
+    col = "black",
+    lwd = 2,
+    xlim = xlim_use,
+    ylim = c(0, ymax),
+    main = transition_names[as.character(k)],
+    xlab = "",
+    ylab = ""
+  )
+  
+  # Parametric estimate
+  lines(fitted_haz$time, fitted_haz$est, col = "red", lwd = 2)
+  
+  # Confidence intervals
+  lines(fitted_haz$time, fitted_haz$lcl, col = "red", lty = 2, lwd = 1.5)
+  lines(fitted_haz$time, fitted_haz$ucl, col = "red", lty = 2, lwd = 1.5)
+  
+ 
+}
+
+#---------------------------------------------------------
+# LEGEND PANEL
+#---------------------------------------------------------
+
+plot.new()
+
+legend(
+  "center",
+  legend = c("Nelson–Aalen", "Parametric fit", "95% CI"),
+  col = c("black", "red", "red"),
+  lty = c(1, 1, 2),
+  lwd = c(2, 2, 1.5),
+  bty = "n",
+  cex = 1.1
 )
 
-cat("\nFigure 1 saved:", file.path(hazard_plot_dir, "Combined_Cumulative_Hazard_Plots.png"), "\n")
+#---------------------------------------------------------
+# GLOBAL LABELS
+#---------------------------------------------------------
+
+mtext("Time in State (Years)", side = 1, outer = TRUE, line = 2.2, cex = 1.2)
+mtext("Cumulative Hazard", side = 2, outer = TRUE, line = 2.2, cex = 1.2)
+
+par(mfrow = c(1,1))
 
 
 # =============================================================================
-# 11. SIMULATION-BASED SEMI-MARKOV TRANSITION PROBABILITIES (FIGURE 2)
+# 11. SIMULATION-BASED SEMI-MARKOV TRANSITION PROBABILITIES 
 # =============================================================================
 
 
@@ -566,8 +670,6 @@ t_eval <- seq(0, 15, by = 0.5)
 # pmatrix.simfs() returns P(s -> j) at each time t
 #====================================================================#
 
-cat("\nComputing simulation-based transition probabilities...\n")
-cat("This may take a few minutes depending on M (number of simulations)\n")
 
 new_profile <- data.frame(
   migration_age_group   = "15-24",
@@ -663,8 +765,9 @@ plot_data_sim$probability[idx] <- 1 - plot_data_sim$probability[idx]
 # Transform CI correctly
 plot_data_sim$lower[idx] <- 1 - old_upper
 plot_data_sim$upper[idx] <- 1 - old_lower
+
 #=========================================================
-# SWAP LABELS FOR PLOTTING ONLY
+# Correcting some labels
 #=========================================================
 
 plot_data_plot <- plot_data_sim
@@ -723,45 +826,7 @@ p_sim <- ggplot(plot_data_plot, aes(x = time, y = probability)) +
     panel.grid.minor = element_blank()
   )
 
-
-
-
-# =============================================================================
-# 13. SOJOURN TIME TABLE
-# =============================================================================
-
-sojourn_results <- purrr::map_dfr(sort(unique(df_smm$trans)), function(k) {
-  
-  mod  <- fitted_models[[as.character(k)]]
-  dist <- gsub("\\.quiet", "", mod$dlist$name)
-  
-  mean_est <- tryCatch(
-    summary(mod, type = "mean", ci = TRUE),
-    error = function(e) NULL
-  )
-  
-  if (!is.null(mean_est)) {
-    est   <- mean_est[[1]]$est
-    lower <- mean_est[[1]]$lcl
-    upper <- mean_est[[1]]$ucl
-  } else {
-    cat("Warning: model-based mean failed for Transition", k, "— using empirical mean.\n")
-    data_k <- subset(df_smm, trans == k)
-    est    <- mean(data_k$time_in_state, na.rm = TRUE)
-    lower  <- upper <- NA
-  }
-  
-  data.frame(
-    Transition   = transition_labels[as.character(k)],
-    Distribution = dist,
-    Mean_Sojourn = round(est,   3),
-    `95% CI`     = paste0("(", round(lower, 3), ", ", round(upper, 3), ")"),
-    stringsAsFactors = FALSE,
-    check.names  = FALSE
-  )
-})
-
-
+save_plot(p_sim, "transition_probabilities.png", 8,4)
 
 # =============================================================================
 # 14. FOREST PLOT OF TRANSITION-SPECIFIC TIME RATIOS (FIGURE 4)
@@ -821,326 +886,25 @@ forest_df <- forest_df %>%
 
 p_forest <- ggplot(forest_df, aes(x = HR, y = Covariate)) +
   geom_vline(xintercept = 1, linetype = "dashed", colour = "red") +
-  geom_errorbarh(aes(xmin = Lower, xmax = Upper), height = 0.25, linewidth = 1) +
+  geom_errorbarh(aes(xmin = Lower, xmax = Upper), width = 0.25, linewidth = 1) +
   geom_point(size = 3.5, shape = 16) +
   scale_x_log10() +
   facet_wrap(~Transition, scales = "free_y", ncol = 2) +
   labs(x = "Time Ratio", y = NULL, title = "Transition-specific Time Ratios") +
   theme_bw(base_size = 12) +
   theme(
-    axis.text  = element_text(size = 11, face = "bold"),
-    axis.title.x = element_text(size = 13, face = "bold"),
+    axis.text  = element_text(size = 12),
+    axis.title.x = element_text(size = 12, face = "bold"),
     strip.text = element_text(size = 11, face = "bold"),
-    plot.title = element_text(hjust = 0.5, face = "bold", size = 14)
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 12)
   )
 
-ggsave(
-  filename = file.path(forest_dir, "Forest_Plot_Hazard_Ratios.png"),
-  plot     = p_forest,
-  width    = 14, height = 10, dpi = 400
-)
-
-cat("Figure 4 saved:", file.path(forest_dir, "Forest_Plot_Hazard_Ratios.png"), "\n")
-
-
-# =============================================================================
-# 15. MARKOV vs SEMI-MARKOV MODEL COMPARISON (TABLE 2)
-# =============================================================================
-# The continuous-time Markov model assumes exponential (memoryless) sojourn time
-# The semi-Markov model uses transition-specific distributions selected by AIC. Both models include the same covariate structure.
-
-cat("\n--- Fitting Markov (exponential) models for comparison ---\n")
-
-markov_models <- purrr::map(transitions, function(k) {
-  data_k <- subset(df_smm, trans == k)
-  
-  if (k %in% c(3, 4)) {
-    formula_k <- Surv(time_in_state, status) ~
-      migration_age_group + ResidenceArea + EducationLevel
-  } else {
-    formula_k <- Surv(time_in_state, status) ~
-      migration_age_group + prior_transitions + ResidenceArea + EducationLevel
-  }
-  
-  flexsurvreg(formula_k, data = data_k, dist = "exp")
-}) %>% setNames(as.character(transitions))
-
-# Aggregate fit statistics across all transitions
-aggregate_fit <- function(models) {
-  loglik <- sum(sapply(models, `[[`, "loglik"))
-  npars  <- sum(sapply(models, `[[`, "npars"))
-  aic    <- sum(sapply(models, AIC))
-  bic    <- -2 * loglik + npars * log(nrow(df_smm))
-  c(LogLik = loglik, Parameters = npars, AIC = aic, BIC = bic)
-}
-
-markov_stats  <- aggregate_fit(markov_models)
-semi_stats    <- aggregate_fit(fitted_models)
-
-comparison_table <- data.frame(
-  Model      = c("Continuous-time Markov (Exponential)", "Semi-Markov (Best-fit distributions)"),
-  Parameters = c(markov_stats["Parameters"],  semi_stats["Parameters"]),
-  LogLik     = round(c(markov_stats["LogLik"], semi_stats["LogLik"]), 2),
-  AIC        = round(c(markov_stats["AIC"],    semi_stats["AIC"]),    2),
-  BIC        = round(c(markov_stats["BIC"],    semi_stats["BIC"]),    2),
-  stringsAsFactors = FALSE
-)
-
-write.csv(comparison_table,
-          file.path(output_dir, "Markov_vs_SemiMarkov_Comparison.csv"),
-          row.names = FALSE)
-
-cat("\nTable 2 — Model comparison:\n")
-print(comparison_table)
-
-
-
-
-#=========================================================
-# 3. FULL TRANSITION NAMES
-#=========================================================
-
-transition_names <- c(
-  "1" = "Inmigration → Outmigration",
-  "2" = "Baseline Resident → Outmigration",
-  "3" = "Inmigration → Internal Movement",
-  "4" = "Baseline Resident → Internal Movement",
-  "5" = "Outmigration → Inmigration",
-  "6" = "Internal Movement → Outmigration",
-  "7" = "Internal Movement → Internal Movement"
-)
-
-#=========================================================
-# 4. FIT BASELINE MODELS (NO COVARIATES)
-#=========================================================
-
-baseline_models <- list()
-
-for (k in transitions) {
-  
-  data_k <- subset(df_smm, trans == k)
-  
-  dist_k <- best_distributions[[as.character(k)]]
-  
-  baseline_models[[as.character(k)]] <- flexsurvreg(
-    Surv(time_in_state, status) ~ 1,
-    data = data_k,
-    dist = dist_k
-  )
-}
-
-#=========================================================
-# 5. TIME GRID
-#=========================================================
-
-t_grid <- seq(0, 15, by = 0.1)
-
-#=========================================================
-# 6. PARAMETRIC CUMULATIVE HAZARD + CI
-#=========================================================
-
-get_param_haz <- function(model, t_grid){
-  
-  s <- summary(model,
-               t = t_grid,
-               type = "cumhaz")[[1]]
-  
-  data.frame(
-    time = s$time,
-    est = s$est,
-    lcl = s$lcl,
-    ucl = s$ucl
-  )
-}
-
-param_list <- list()
-
-for (k in names(baseline_models)) {
-  
-  df <- get_param_haz(baseline_models[[k]], t_grid)
-  df$Transition <- k
-  
-  param_list[[k]] <- df
-}
-
-param_haz <- do.call(rbind, param_list)
-
-#=========================================================
-# 7. NON-PARAMETRIC (NELSON–AALEN)
-#=========================================================
-
-get_np_haz <- function(data_k){
-  
-  fit <- survfit(Surv(time_in_state, status) ~ 1, data = data_k)
-  
-  data.frame(
-    time = fit$time,
-    haz = fit$cumhaz
-  )
-}
-
-np_list <- list()
-
-for (k in transitions) {
-  
-  data_k <- subset(df_smm, trans == k)
-  
-  df <- get_np_haz(data_k)
-  df$Transition <- as.character(k)
-  
-  np_list[[as.character(k)]] <- df
-}
-
-np_haz <- do.call(rbind, np_list)
-
-#=========================================================
-# 8. PLOTTING SETUP
-#=========================================================
-
-par(mfrow = c(3, 3), mar = c(3.5, 3.5, 3, 1))
-
-#=========================================================
-# 9. LOOP PLOTTING
-#=========================================================
-
-for (k in transitions) {
-  
-  data_k <- subset(df_smm, trans == k)
-  
-  sf <- survfit(Surv(time_in_state, status) ~ 1, data = data_k)
-  na_hazard <- sf$cumhaz
-  
-  fitted_haz <- param_haz[param_haz$Transition == as.character(k), ]
-  
-  #-------------------------------------------------------
-  # X-axis rule (SPECIAL CASE FOR TRANSITION 3)
-  #-------------------------------------------------------
-  
-  if (k == 3) {
-    xlim_use <- c(0, 1)
-  } else {
-    xlim_use <- c(0, 15)
-  }
-  
-  #-------------------------------------------------------
-  # Y-axis
-  #-------------------------------------------------------
-  
-  ymax <- max(na_hazard, fitted_haz$ucl, na.rm = TRUE)
-  
-  #-------------------------------------------------------
-  # MAIN PLOT
-  #-------------------------------------------------------
-  
-  plot(
-    sf$time,
-    na_hazard,
-    type = "s",
-    col = "black",
-    lwd = 2,
-    xlim = xlim_use,
-    ylim = c(0, ymax),
-    main = transition_names[as.character(k)],
-    xlab = "",
-    ylab = ""
-  )
-  
-  #-------------------------------------------------------
-  # PARAMETRIC LINE
-  #-------------------------------------------------------
-  
-  lines(
-    fitted_haz$time,
-    fitted_haz$est,
-    col = "red",
-    lwd = 2
-  )
-  
-  #-------------------------------------------------------
-  # CI (RED DOTTED LINES)
-  #-------------------------------------------------------
-  
-  lines(
-    fitted_haz$time,
-    fitted_haz$lcl,
-    col = "red",
-    lwd = 1.5,
-    lty = 2
-  )
-  
-  lines(
-    fitted_haz$time,
-    fitted_haz$ucl,
-    col = "red",
-    lwd = 1.5,
-    lty = 2
-  )
-  
-  #-------------------------------------------------------
-  # NELSON–AALEN ON TOP
-  #-------------------------------------------------------
-  
-  lines(
-    sf$time,
-    na_hazard,
-    type = "s",
-    col = "black",
-    lwd = 2
-  )
-}
-
-#=========================================================
-# 10. LEGEND PANEL
-#=========================================================
-
-plot.new()
-
-legend(
-  "center",
-  legend = c(
-    "Nelson–Aalen",
-    "Parametric fit",
-    "95% CI"
-  ),
-  col = c("black", "red", "red"),
-  lty = c(1, 1, 2),
-  lwd = c(2, 2, 1.5),
-  bty = "n",
-  cex = 1.1
-)
-
-#=========================================================
-# 11. GLOBAL LABELS
-#=========================================================
-
-mtext(
-  "Time in State (Years)",
-  side = 1,
-  outer = TRUE,
-  line = 2.2,
-  cex = 1.2
-)
-
-mtext(
-  "Cumulative Hazard",
-  side = 2,
-  outer = TRUE,
-  line = 2.2,
-  cex = 1.2
-)
-
-
-#=========================================================
-# RESET
-#=========================================================
-
-par(mfrow = c(1,1))
-
+save_plot(p_forest,"forest_plot.png", 14,10)
 
 # =============================================================================
 # COMPILE AND SAVE WORD DOCUMENT
 # =============================================================================
-
+library(officer)
 doc <- read_docx()
 
 #Table 1: Observed transitions 
@@ -1149,23 +913,11 @@ doc <- doc %>%
   body_add_flextable(flextable(obs_combined) %>% theme_booktabs() %>% autofit()) %>%
   body_add_par("", style = "Normal")
 
-#Table 1: Model fit statistics
-doc <- doc %>%
-  body_add_par("Table 1: Best Parametric Distribution by Transition", style = "heading 1") %>%
-  body_add_flextable(flextable(table1_fit) %>% theme_booktabs() %>% autofit()) %>%
-  body_add_par("", style = "Normal")
-
-#Table 2: Markov vs Semi-Markov comparison 
-doc <- doc %>%
-  body_add_par("Table 2: Comparison of Continuous-Time Markov and Semi-Markov Models",
-               style = "heading 1") %>%
-  body_add_flextable(flextable(comparison_table) %>% theme_booktabs() %>% autofit()) %>%
-  body_add_par("", style = "Normal")
 
 #Table 3: Hazard ratios
 doc <- doc %>%
   body_add_par("Table 3: Time Ratios and 95% Confidence Intervals", style = "heading 1") %>%
-  body_add_flextable(flextable(hazard_final) %>% theme_booktabs() %>% autofit()) %>%
+  body_add_flextable(flextable(hazard_ratios) %>% theme_booktabs() %>% autofit()) %>%
   body_add_par("", style = "Normal")
 
 
@@ -1176,48 +928,8 @@ doc <- doc %>%
   body_add_flextable(flextable(sojourn_results) %>% theme_booktabs() %>% autofit()) %>%
   body_add_par("", style = "Normal")
 
-#Figure 1: Cumulative hazard plots 
-doc <- doc %>%
-  body_add_par(
-    "Figure 1: Baseline fitted parametric cumulative hazard functions overlaid on Nelson–Aalen estimates.",
-    style = "heading 1"
-  ) %>%
-  body_add_img(
-    src    = file.path(hazard_plot_dir, "Combined_Cumulative_Hazard_Plots.png"),
-    width  = 7, height = 5.5
-  ) %>%
-  body_add_par("", style = "Normal")
-
-#Figure 2: Transition probabilities
-doc <- doc %>%
-  body_add_par("Figure 2: Semi-Markov simulation-based transition probabilities.", style = "heading 1") %>%
-  body_add_img(
-    src    = file.path(tp_dir, "SemiMarkov_Transition_Probabilities.png"),
-    width  = 7, height = 4.5
-  ) %>%
-  body_add_par("", style = "Normal")
-
-#Figure 3: Transition diagram 
-doc <- doc %>%
-  body_add_par("Figure 3: Migration state transition diagram.", style = "heading 1") %>%
-  body_add_img(
-    src    = file.path(diagram_dir, "transition_diagram.png"),
-    width  = 7, height = 5
-  ) %>%
-  body_add_par("", style = "Normal")
-
-# Figure 4: Forest plot 
-doc <- doc %>%
-  body_add_par("Figure 4: Forest plot of transition-specific time ratios.", style = "heading 1") %>%
-  body_add_img(
-    src    = file.path(forest_dir, "Forest_Plot_Hazard_Ratios.png"),
-    width  = 7, height = 5.5
-  ) %>%
-  body_add_par("", style = "Normal")
-
 # Save word document
-print(doc, target = file.path(output_dir, "SemiMarkov_Model_Results.docx"))
+print(doc, "SemiMarkov_Model_Results.docx")
 
-cat("\n==========================================================\n")
-cat("All outputs saved to:", output_dir, "\n")
-cat("==========================================================\n")
+
+#=========================================================================== END ==================================
