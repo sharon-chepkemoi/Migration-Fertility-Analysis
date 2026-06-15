@@ -1,0 +1,25 @@
+# Rhistory
+.Rhistory
+
+# Rdata files
+*.RData
+
+# rds files
+*.rds
+
+# sav files
+*.sav
+
+# dta files
+*.dta
+
+# word files
+*.doc
+*.docx
+
+# csv files
+*.csv
+
+# excel files
+*.xlsx
+.Rproj.user
